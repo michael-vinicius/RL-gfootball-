@@ -1,82 +1,100 @@
 import gfootball.env as football_env
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+import gym
 import os
 
-# --- CONFIGURAÇÃO FASE 3 (FINAL) ---
-raiz = "/gfootball/meu_projeto"
-log_dir = os.path.join(raiz, "logs_fase3")
-models_dir = os.path.join(raiz, "modelos_fase3")
-best_model_dir = os.path.join(raiz, "melhor_modelo_fase3") # Onde ficará o CAMPEÃO MUNDIAL
+# === CONFIGURAÇÕES ===
+# Ajuste o caminho para onde está o FASE2_FINAL no seu SERVIDOR
+modelo_anterior = os.path.expanduser("~/RL-gfootball-/src/modelos_fase2/FASE2_FINAL") 
+# Se der erro de arquivo não encontrado, use o checkpoint mais recente da fase 2
 
-os.makedirs(log_dir, exist_ok=True)
+log_dir = os.path.expanduser("~/gfootball_logs/FASE3_DRIBLE")
+models_dir = f"{log_dir}/models"
 os.makedirs(models_dir, exist_ok=True)
-os.makedirs(best_model_dir, exist_ok=True)
 
-# 1. AMBIENTE 5 vs 5 (O JOGO REAL)
-# Stacked=True é obrigatório (cérebro já acostumou com memória)
-env = football_env.create_environment(
-    env_name='5_vs_5', 
-    stacked=True,  
-    representation='simple115',
-    rewards='scoring,checkpoints', 
-    render=False
-)
+print("\n" + "=" * 80)
+print("🚀 FASE 3 - O DUELO (3 vs 1) 🚀")
+print("   Objetivo: Enfrentar zagueiro + goleiro (Drible ou Passe)")
+print("=" * 80 + "\n")
 
-# 2. AMBIENTE DE AVALIAÇÃO
-env_eval = football_env.create_environment(
-    env_name='5_vs_5', 
-    stacked=True,  
-    representation='simple115',
-    rewards='scoring,checkpoints', 
-    render=False
-)
+# === ADAPTER ===
+class GfootballAdapter(gym.Env):
+    def __init__(self, env):
+        self.env = env
+        obs_space = env.observation_space
+        self.observation_space = gym.spaces.Box(
+            low=obs_space.low, high=obs_space.high,
+            shape=obs_space.shape, dtype='float32'
+        )
+        act_space = env.action_space
+        self.action_space = gym.spaces.Discrete(act_space.n)
+    def reset(self): return self.env.reset()
+    def step(self, action): return self.env.step(action)
 
-# 3. CARREGAR O CAMPEÃO DA FASE 2
-# Tenta pegar o BEST model automático. Se não tiver, pega o FINAL.
-caminho_best = os.path.join(raiz, "melhor_modelo_fase2", "best_model.zip")
-caminho_final = os.path.join(raiz, "modelo_fase2_final.zip")
+# === CONTADOR DE GOLS ===
+class GoalCounter(BaseCallback):
+    def __init__(self):
+        super().__init__()
+        self.goals = 0
+    def _on_step(self) -> bool:
+        rewards = self.locals.get('rewards', [])
+        if rewards is not None: 
+            self.goals += sum(1 for r in rewards if r > 0.8)
+        return True
+    def _on_rollout_end(self) -> None:
+        self.logger.record('rollout/goals', self.goals)
+        self.goals = 0
 
-if os.path.exists(caminho_best):
-    modelo_carregar = caminho_best
-    print(f"Carregando o MELHOR momento da Fase 2: {modelo_carregar}")
-elif os.path.exists(caminho_final):
-    modelo_carregar = caminho_final
-    print(f"Carregando o modelo FINAL da Fase 2: {modelo_carregar}")
-else:
-    print("ERRO: Não achei nenhum modelo da Fase 2. Verifique os nomes!")
-    exit()
+# === AMBIENTE ===
+def make_env():
+    env = football_env.create_environment(
+        # CORREÇÃO: Usando cenário oficial que tem zagueiro
+        env_name='academy_3_vs_1_with_keeper', 
+        stacked=True,
+        representation='simple115',
+        rewards='scoring,checkpoints', 
+        render=False
+    )
+    env = GfootballAdapter(env)
+    env = Monitor(env)
+    return env
 
-try:
-    # Ajuste Fino para o Jogo Completo
-    custom_objects = {
-        "learning_rate": 0.0001, # Baixa para refinar
-        "ent_coef": 0.01         # Padrão para manter estabilidade
-    }
-    model = PPO.load(modelo_carregar, env=env, custom_objects=custom_objects, print_system_info=True)
-except Exception as e:
-    print(f"Erro ao carregar: {e}")
-    exit()
+if __name__ == "__main__":
+    vec_env = DummyVecEnv([make_env for _ in range(8)])
+    
+    vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, clip_obs=10.)
 
-# --- CALLBACKS ---
-# Salva histórico a cada 100k
-checkpoint_callback = CheckpointCallback(save_freq=100000, save_path=models_dir, name_prefix='ppo_5v5_final')
+    print(f"🧠 Carregando o Craque da Fase 2: {modelo_anterior}")
+    
+    # Carrega o modelo anterior
+    # Tenta carregar. Se falhar, verifique o caminho do arquivo zip
+    try:
+        model = PPO.load(modelo_anterior, env=vec_env, device="auto")
+        print("✅ Modelo carregado com sucesso!")
+    except Exception as e:
+        print(f"❌ ERRO ao carregar modelo Fase 2: {e}")
+        print("   Verifique se o caminho em 'modelo_anterior' está apontando para o arquivo .zip correto.")
+        exit()
+    
+    # === AJUSTES FINOS PARA FASE 3 ===
+    model.learning_rate = 0.0001 
+    model.ent_coef = 0.03        
+    model.n_steps = 2048
+    model.tensorboard_log = log_dir
 
-# O Juiz avalia a cada 50k steps (no 5v5 jogos são demorados, melhor espaçar mais)
-eval_callback = EvalCallback(
-    env_eval, 
-    best_model_save_path=best_model_dir,
-    log_path=log_dir, 
-    eval_freq=50000, 
-    deterministic=True, 
-    render=False
-)
+    callbacks = [
+        CheckpointCallback(save_freq=50_000, save_path=models_dir, name_prefix='ckpt_fase3'),
+        GoalCounter(),
+    ]
 
-print("--- INICIANDO FASE 3: A COPA DO MUNDO (5vs5) ---")
-print("O agente vai apanhar no começo até perceber que precisa variar as jogadas.")
+    print("\n🤼 TREINANDO (1.5 Milhões de steps)...")
+    model.learn(total_timesteps=1_500_000, callback=callbacks, progress_bar=True)
 
-# 3 Milhões de steps. (Pode parar antes se o ep_rew_mean ficar positivo)
-model.learn(total_timesteps=3000000, callback=[checkpoint_callback, eval_callback])
+    model.save(f"{models_dir}/FASE3_FINAL")
+    vec_env.save(f"{models_dir}/vec_normalize_fase3.pkl")
+    vec_env.close()
 
-model.save(os.path.join(raiz, "modelo_final_absoluto"))
-print("Treinamento completo finalizado!")
+    print("✅ FASE 3 COMPLETA!")

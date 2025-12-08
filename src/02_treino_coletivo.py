@@ -1,71 +1,101 @@
 import gfootball.env as football_env
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
+from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+import gym
 import os
 
-# --- CONFIGURAÇÃO FASE 2 ---
-raiz = "/gfootball/meu_projeto"
-log_dir = os.path.join(raiz, "logs_fase2")
-models_dir = os.path.join(raiz, "modelos_fase2")
-best_model_dir = os.path.join(raiz, "melhor_modelo_fase2") # Pasta para o campeão
+# === CONFIGURAÇÕES ===
+# Onde está o modelo da Fase 1 (o "cérebro" inteligente)
+# IMPORTANTE: Confirme se o nome do arquivo zip está correto na sua pasta
+modelo_fase1 = os.path.expanduser("~/gfootball_logs/FASE1_CORRIGIDO/models/FASE1_FINAL") 
+# Se o FASE1_FINAL não existir, use o último checkpoint: ckpt_400000_steps
 
-os.makedirs(log_dir, exist_ok=True)
+# Onde vamos salvar a Fase 2
+log_dir = os.path.expanduser("~/gfootball_logs/FASE2_GOLEIRO")
+models_dir = f"{log_dir}/models"
 os.makedirs(models_dir, exist_ok=True)
-os.makedirs(best_model_dir, exist_ok=True)
 
-# 1. AMBIENTE DE TREINO (Onde ele sua a camisa)
-env = football_env.create_environment(
-    env_name='academy_3_vs_1_with_keeper', 
-    stacked=True,  
-    representation='simple115',
-    rewards='scoring,checkpoints', 
-    render=False
-)
+print("\n" + "=" * 80)
+print("🚀 FASE 2 - AGORA TEM GOLEIRO! 🚀")
+print("   Carregando conhecimentos da Fase 1...")
+print("=" * 80 + "\n")
 
-# 2. AMBIENTE DE AVALIAÇÃO (O JUIZ) - NOVO!
-# É necessário ter um ambiente separado para testar sem interferir no treino
-env_eval = football_env.create_environment(
-    env_name='academy_3_vs_1_with_keeper', 
-    stacked=True,  
-    representation='simple115',
-    rewards='scoring,checkpoints', 
-    render=False
-)
+# === ADAPTER (Igual à Fase 1) ===
+class GfootballAdapter(gym.Env):
+    def __init__(self, env):
+        self.env = env
+        obs_space = env.observation_space
+        self.observation_space = gym.spaces.Box(
+            low=obs_space.low, high=obs_space.high,
+            shape=obs_space.shape, dtype='float32'
+        )
+        act_space = env.action_space
+        self.action_space = gym.spaces.Discrete(act_space.n)
+    def reset(self): return self.env.reset()
+    def step(self, action): return self.env.step(action)
 
-# 3. CARREGAR O CAMPEÃO DA FASE 1
-modelo_fase1 = os.path.join(raiz, "modelo_fase1_campeao.zip")
-print(f"Carregando o Artilheiro da Fase 1: {modelo_fase1}")
+# === CONTADOR DE GOLS ===
+class GoalCounter(BaseCallback):
+    def __init__(self):
+        super().__init__()
+        self.goals = 0
+    def _on_step(self) -> bool:
+        rewards = self.locals.get('rewards', [])
+        if rewards is not None: self.goals += sum(1 for r in rewards if r > 0)
+        return True
+    def _on_rollout_end(self) -> None:
+        self.logger.record('rollout/goals', self.goals)
+        self.goals = 0
 
-try:
-    custom_objects = {
-        "learning_rate": 0.0001,
-        "ent_coef": 0.03
-    }
-    model = PPO.load(modelo_fase1, env=env, custom_objects=custom_objects, print_system_info=True)
-except Exception as e:
-    print(f"Erro ao carregar modelo: {e}")
-    exit()
+# === CRIAÇÃO DO AMBIENTE ===
+def make_env():
+    env = football_env.create_environment(
+        env_name='academy_run_to_score_with_keeper', 
+        stacked=True,
+        representation='simple115',
+        # MUDANÇA AQUI: Adicionamos 'checkpoints'
+        rewards='scoring,checkpoints', 
+        render=False
+    )
+    env = GfootballAdapter(env)
+    env = Monitor(env)
+    return env
 
-# --- CALLBACKS (Os Ajudantes) ---
+if __name__ == "__main__":
+    # 1. Cria 8 ambientes paralelos
+    vec_env = DummyVecEnv([make_env for _ in range(8)])
+    
+    # 2. Cria nova normalização
+    # Não carregamos a normalização antiga (pkl) porque o campo/distâncias mudaram.
+    # O agente vai re-aprender a "escala" do mundo rapidamente.
+    vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, clip_obs=10.)
 
-# 1. O Historiador (Salva tudo a cada 50k, por garantia)
-checkpoint_callback = CheckpointCallback(save_freq=50000, save_path=models_dir, name_prefix='fase2_passe')
+    # 3. Carrega o CÉREBRO da Fase 1
+    # custom_objects serve para ajustar caso a versão do python/biblioteca mude, mas geralmente não precisa
+    print(f"🧠 Carregando pesos de: {modelo_fase1}")
+    
+    # Carregamos o modelo, mas passamos o 'env' novo para ele se conectar ao novo desafio
+    model = PPO.load(modelo_fase1, env=vec_env, device="auto")
+    
+    # Ajustamos parâmetros para refino (opcional, mas ajuda)
+    model.learning_rate = 0.0002       # Taxa menor para não esquecer o que já sabe
+    model.ent_coef = 0.03              # Um pouco de exploração para tentar driblar
+    model.n_steps = 2048
+    model.tensorboard_log = log_dir
 
-# 2. O Juiz (Testa a cada 10k e salva o MELHOR) - NOVO!
-eval_callback = EvalCallback(
-    env_eval, 
-    best_model_save_path=best_model_dir,
-    log_path=log_dir, 
-    eval_freq=10000, # A cada 10 mil passos ele para e testa
-    deterministic=True, 
-    render=False
-)
+    callbacks = [
+        CheckpointCallback(save_freq=50_000, save_path=models_dir, name_prefix='ckpt_fase2'),
+        GoalCounter(),
+    ]
 
-print("--- INICIANDO FASE 2: APRENDER A TOCAR A BOLA ---")
-print("Agora com salvamento automático do 'best_model.zip'")
+    print("\n🥊 TREINANDO CONTRA O GOLEIRO (1 Milhão de steps)...")
+    # Treina por mais tempo pois agora é mais difícil
+    model.learn(total_timesteps=1_000_000, callback=callbacks, progress_bar=True)
 
-# Passamos uma LISTA de callbacks
-model.learn(total_timesteps=800000, callback=[checkpoint_callback, eval_callback])
+    model.save(f"{models_dir}/FASE2_FINAL")
+    vec_env.save(f"{models_dir}/vec_normalize_fase2.pkl")
+    vec_env.close()
 
-model.save(os.path.join(raiz, "modelo_fase2_final"))
-print("Fase 2 finalizada!")
+    print("✅ FASE 2 COMPLETA!")

@@ -7,18 +7,17 @@ import gym
 import os
 
 # === CONFIGURAÇÕES ===
-# Carregamos o modelo "Driblador" da Fase 3
-# Ajuste o caminho para onde está o FASE3_FINAL no seu servidor
-modelo_anterior = os.path.expanduser("~/gfootball_logs/FASE3_DRIBLE/models/FASE3_FINAL")
-# Dica: Se não salvou a Fase 3 com esse nome, use o checkpoint mais recente
+# Carregamos o modelo "Coletivo" da Fase 4
+# AJUSTE ESTE CAMINHO conforme seus logs anteriores
+modelo_anterior = os.path.expanduser("~/gfootball_logs/FASE4_PASSE/models/FASE4_FINAL") 
 
-log_dir = os.path.expanduser("~/gfootball_logs/FASE4_PASSE")
+log_dir = os.path.expanduser("~/gfootball_logs/FASE5_FINAL")
 models_dir = f"{log_dir}/models"
 os.makedirs(models_dir, exist_ok=True)
 
 print("\n" + "=" * 80)
-print("🚀 FASE 4 - O JOGO COLETIVO (Passe e Chute) 🚀")
-print("   Objetivo: Aprender que passar a bola facilita o gol.")
+print("🏆 FASE 5 - A GRANDE FINAL (5 vs 5) 🏆")
+print("   Objetivo: Jogar futebol completo.")
 print("=" * 80 + "\n")
 
 # === ADAPTER ===
@@ -43,7 +42,6 @@ class GoalCounter(BaseCallback):
     def _on_step(self) -> bool:
         rewards = self.locals.get('rewards', [])
         if rewards is not None: 
-            # Soma gol se recompensa for alta (ignora checkpoints)
             self.goals += sum(1 for r in rewards if r > 0.8)
         return True
     def _on_rollout_end(self) -> None:
@@ -53,10 +51,12 @@ class GoalCounter(BaseCallback):
 # === AMBIENTE ===
 def make_env():
     env = football_env.create_environment(
-        # CENÁRIO NOVO: Focado em tocar a bola
-        env_name='academy_pass_and_shoot_with_keeper', 
+        # O CENÁRIO REAL: Futebol 5 contra 5
+        env_name='5_vs_5', 
         stacked=True,
         representation='simple115',
+        # Scoring puro é muito difícil no 5v5 logo de cara.
+        # Mantemos checkpoints para ele não ficar perdido no meio campo.
         rewards='scoring,checkpoints', 
         render=False
     )
@@ -65,39 +65,41 @@ def make_env():
     return env
 
 if __name__ == "__main__":
-    vec_env = DummyVecEnv([make_env for _ in range(8)])
+    # Vamos aumentar para 16 ambientes em paralelo se o servidor aguentar
+    # Se der erro de memória, volte para 8.
+    n_envs = 8 
+    vec_env = DummyVecEnv([make_env for _ in range(n_envs)])
     
-    # Normalização
     vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, clip_obs=10.)
 
-    print(f"🧠 Carregando o Driblador da Fase 3: {modelo_anterior}")
+    print(f"🧠 Carregando o Jogador Completo da Fase 4: {modelo_anterior}")
     
     try:
         model = PPO.load(modelo_anterior, env=vec_env, device="auto")
-        print("✅ Modelo carregado! Iniciando refinamento tático...")
+        print("✅ Modelo carregado! O jogo vai começar...")
     except Exception as e:
-        print(f"❌ ERRO: Não achei o modelo da Fase 3: {e}")
-        print("   Verifique o caminho na variável 'modelo_anterior'.")
+        print(f"❌ ERRO: Não achei o modelo da Fase 4: {e}")
         exit()
     
-    # === AJUSTES FINOS PARA FASE 4 ===
-    # Learning Rate MUITO BAIXO: Cirurgia fina no cérebro
+    # === AJUSTES FINAIS ===
+    # Mantemos learning rate baixo para refinar a estratégia
     model.learning_rate = 0.00005 
-    model.ent_coef = 0.03        
+    model.ent_coef = 0.02 # Levemente menor, queremos menos "loucura" e mais consistência
     model.n_steps = 2048
     model.tensorboard_log = log_dir
 
     callbacks = [
-        CheckpointCallback(save_freq=50_000, save_path=models_dir, name_prefix='ckpt_fase4'),
+        # Salvamos com menos frequência pois o treino é longo
+        CheckpointCallback(save_freq=100_000, save_path=models_dir, name_prefix='ckpt_5v5'),
         GoalCounter(),
     ]
 
-    print("\n⚽ TREINANDO COLETIVO (2 Milhões de steps)...")
-    # Treino mais longo para ele descobrir a complexidade do passe
-    model.learn(total_timesteps=2_000_000, callback=callbacks, progress_bar=True)
+    print("\n🏆 TREINANDO A PARTIDA FINAL (3 Milhões de steps)...")
+    # Isso vai demorar algumas horas, mas é o teste final
+    model.learn(total_timesteps=3_000_000, callback=callbacks, progress_bar=True)
 
-    model.save(f"{models_dir}/FASE4_FINAL")
-    vec_env.save(f"{models_dir}/vec_normalize_fase4.pkl")
+    model.save(f"{models_dir}/CAMPEAO_5V5")
+    vec_env.save(f"{models_dir}/vec_normalize_5v5.pkl")
     vec_env.close()
 
-    print("✅ FASE 4 COMPLETA! O Agente aprendeu a passar!")
+    print("✅ PROJETO CONCLUÍDO! VOCÊ CRIOU UMA IA JOGADORA DE FUTEBOL!")
